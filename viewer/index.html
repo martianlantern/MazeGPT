@@ -1,0 +1,176 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>MazeGPT — Live Training</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root { --bg:#0b0e14; --fg:#e6e6e6; --muted:#9aa0a6; --accent:#7aa2f7; --bad:#ef5350; --ok:#66bb6a; }
+    html,body { margin:0; padding:0; background:var(--bg); color:var(--fg); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;}
+    .wrap { max-width: 1100px; margin: 24px auto; padding: 0 16px; }
+    h1 { margin: 0 0 12px; font-size: 22px; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+    .card { background: #111723; border: 1px solid #1b2332; border-radius: 12px; padding: 12px; }
+    canvas { width: 100%; height: 240px; background: #0f141e; border-radius: 8px; }
+    pre { white-space: pre; background: #0f141e; padding: 12px; border-radius: 8px; overflow: auto; }
+    .tiny { color: var(--muted); font-size: 12px; }
+    .path span.bad { color: var(--bad); font-weight: bold; }
+    .path span.ok { color: var(--ok); font-weight: bold; }
+    .kvs { display: flex; gap: 12px; flex-wrap: wrap; }
+    .kv { background:#0f141e; border-radius:6px; padding:6px 8px; }
+    a { color: var(--accent); text-decoration: none; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>MazeGPT — Live Training</h1>
+    <div class="kvs tiny">
+      <div class="kv">Refreshes every 2s</div>
+      <div class="kv">This directory is your run root (metrics.jsonl, samples/)</div>
+      <div class="kv"><a href="samples/" target="_blank">Browse samples</a></div>
+    </div>
+
+    <div class="row">
+      <div class="card">
+        <h3>Train Loss</h3>
+        <canvas id="train"></canvas>
+      </div>
+      <div class="card">
+        <h3>Eval Loss</h3>
+        <canvas id="eval"></canvas>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Latest Sample <span class="tiny" id="latest-time"></span></h3>
+      <div class="row">
+        <div>
+          <pre id="maze">(waiting for samples/latest.json)</pre>
+        </div>
+        <div>
+          <div>Target vs Predicted Path</div>
+          <pre class="path" id="paths"></pre>
+        </div>
+      </div>
+    </div>
+
+    <p class="tiny">Tip: if charts look flat, zoom the y-axis by training longer or reduce batch size to increase variance.</p>
+  </div>
+
+  <script>
+    const trainCanvas = document.getElementById("train");
+    const evalCanvas = document.getElementById("eval");
+    const mazePre = document.getElementById("maze");
+    const pathsPre = document.getElementById("paths");
+    const latestTime = document.getElementById("latest-time");
+
+    function parseJSONL(text) {
+      const lines = text.trim().split("\n").filter(Boolean);
+      return lines.map(l => { try { return JSON.parse(l) } catch { return null } }).filter(Boolean);
+    }
+
+    function drawLineChart(canvas, pairs, color='white') {
+      const ctx = canvas.getContext("2d");
+      const w = canvas.width = canvas.clientWidth * devicePixelRatio;
+      const h = canvas.height = canvas.clientHeight * devicePixelRatio;
+      ctx.clearRect(0,0,w,h);
+      if (!pairs.length) {
+        ctx.fillStyle = "#9aa0a6";
+        ctx.fillText("No data yet", 12, 20);
+        return;
+      }
+      const xs = pairs.map(p => p[0]);
+      const ys = pairs.map(p => p[1]);
+      const minx = Math.min(...xs), maxx = Math.max(...xs);
+      const miny = Math.min(...ys), maxy = Math.max(...ys);
+      const pad = 40 * devicePixelRatio;
+
+      // axes
+      ctx.strokeStyle = "#334155";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(pad, h - pad);
+      ctx.lineTo(w - pad/2, h - pad);
+      ctx.moveTo(pad, h - pad);
+      ctx.lineTo(pad, pad/2);
+      ctx.stroke();
+
+      // ticks
+      ctx.fillStyle = "#9aa0a6";
+      ctx.font = `${12*devicePixelRatio}px ui-monospace,monospace`;
+      function mapx(x){ return pad + (w - pad*1.5) * ((x - minx) / Math.max(1e-6, (maxx - minx))); }
+      function mapy(y){ return h - pad - (h - pad*1.5) * ((y - miny) / Math.max(1e-6, (maxy - miny))); }
+
+      // grid
+      const ticks = 5;
+      for (let i=0;i<=ticks;i++){
+        const t = i/ticks;
+        const gx = pad + (w - pad*1.5) * t;
+        const gy = h - pad - (h - pad*1.5) * t;
+        ctx.strokeStyle = "#1f2937";
+        ctx.beginPath();
+        ctx.moveTo(pad, gy);
+        ctx.lineTo(w - pad/2, gy);
+        ctx.stroke();
+      }
+
+      // line
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2 * devicePixelRatio;
+      ctx.beginPath();
+      for (let i=0;i<pairs.length;i++){
+        const x = mapx(pairs[i][0]);
+        const y = mapy(pairs[i][1]);
+        if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+      }
+      ctx.stroke();
+    }
+
+    function diffPaths(target, pred) {
+      const L = Math.max(target.length, pred.length);
+      let html = "";
+      for (let i=0;i<L;i++){
+        const t = target[i] || "";
+        const p = pred[i] || "";
+        if (!t && p) {
+          html += `<span class="bad">+${p}</span>`;
+        } else if (t && !p) {
+          html += `<span class="bad">-${t}</span>`;
+        } else if (t === p) {
+          html += `<span class="ok">${p}</span>`;
+        } else {
+          html += `<span class="bad">${p}</span>`;
+        }
+      }
+      return html;
+    }
+
+    async function poll() {
+      try {
+        const m = await fetch(`metrics.jsonl?ts=${Date.now()}`);
+        if (m.ok) {
+          const text = await m.text();
+          const rows = parseJSONL(text);
+          const train = rows.filter(r => 'train_loss' in r).map(r => [r.step, r.train_loss]);
+          const evals = rows.filter(r => 'eval_loss' in r).map(r => [r.step, r.eval_loss]);
+          drawLineChart(trainCanvas, train, '#7aa2f7');
+          drawLineChart(evalCanvas, evals, '#66bb6a');
+        }
+      } catch (e) {}
+
+      try {
+        const s = await fetch(`samples/latest.json?ts=${Date.now()}`);
+        if (s.ok) {
+          const js = await s.json();
+          latestTime.textContent = `@ ${js.time} (step ${js.step})`;
+          mazePre.textContent = js.maze_text;
+          pathsPre.innerHTML = diffPaths(js.target_path || "", js.pred_path || "");
+        }
+      } catch (e) {}
+    }
+
+    setInterval(poll, 2000);
+    poll();
+  </script>
+</body>
+</html>
