@@ -1,7 +1,7 @@
 # MazeGPT
 Train tiny gpt to solve maze with live training viewer
 
-![](./assets/training.png)
+![](./training.png)
 
 Run with
 ```bash
